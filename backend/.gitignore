@@ -1,0 +1,31 @@
+# Entornos virtuales
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Archivos compilados de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+logs/
+*.log
+
+# Entornos de desarrollo / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Pruebas y Cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Modelos en caché (PaddleOCR / HuggingFace)
+.paddlex/
+.cache/
