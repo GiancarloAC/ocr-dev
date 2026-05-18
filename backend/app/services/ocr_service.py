@@ -1,10 +1,14 @@
 import logging
 import os
 import tempfile
-from typing import Dict, Any
+import gc
+from typing import Dict, Any, Tuple
 import easyocr
 from app.core.config import settings
 from app.utils.pdf_utils import convert_pdf_to_images
+from app.utils.pdf_extraction import extract_text_from_pdf
+from app.utils.text_validation import validate_extracted_text, is_pdf_likely_scanned
+from app.utils.memory_profiler import log_memory_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +61,10 @@ class OCRService:
                     "box": box
                 })
             
+            # Cleanup
+            del result
+            gc.collect()
+            
             return {
                 "raw_text": raw_text.strip(),
                 "structured_data": structured_data
@@ -66,9 +74,87 @@ class OCRService:
             raise
 
     def process_pdf(self, pdf_path: str) -> Dict[str, Any]:
-        """Process a multi-page PDF document"""
-        logger.info(f"Processing PDF: {pdf_path}")
+        """
+        Process a multi-page PDF document.
         
+        Strategy:
+        1. Try extract_text_from_pdf() first
+        2. Validate extracted text (heuristics)
+        3. If valid and not scanned -> use extracted text
+        4. If invalid or scanned -> fallback to OCR
+        """
+        logger.info(f"Processing PDF: {pdf_path}")
+        log_memory_checkpoint("START process_pdf")
+        
+        # Step 1: Try extraction
+        extracted_text, page_count = extract_text_from_pdf(pdf_path)
+        log_memory_checkpoint("AFTER text_extraction")
+        
+        # Step 2: Validate extraction
+        is_valid, confidence, reason = validate_extracted_text(extracted_text, lang=settings.OCR_LANG)
+        is_scanned, scan_confidence = is_pdf_likely_scanned(extracted_text, page_count)
+        
+        logger.info(f"Extraction validation: valid={is_valid}, confidence={confidence:.2%}, reason={reason}")
+        logger.info(f"PDF likely scanned: {is_scanned}, scan_confidence={scan_confidence:.2%}")
+        
+        # Step 3: If text is valid and PDF is not scanned, use extraction
+        if is_valid and not is_scanned:
+            logger.info("✓ Using extracted text (no OCR needed)")
+            log_memory_checkpoint("TEXT_EXTRACTION_SUCCESS")
+            # Parse pages from extracted text
+            pages_result = self._parse_extracted_pages(extracted_text)
+            return {
+                "raw_text": extracted_text,
+                "pages": pages_result,
+                "extraction_method": "text_extraction",
+                "processed_via_ocr": False
+            }
+        
+        # Step 4: Fallback to OCR
+        logger.info("→ Fallback to OCR (extracted text invalid or PDF is scanned)")
+        log_memory_checkpoint("BEFORE OCR_FALLBACK")
+        result = self._process_pdf_with_ocr(pdf_path)
+        log_memory_checkpoint("END process_pdf")
+        return result
+
+    def _parse_extracted_pages(self, extracted_text: str) -> list:
+        """
+        Parse extracted text back into page-based structure.
+        Expected format: "--- Page N ---\ntext\n\n"
+        """
+        pages_result = []
+        current_page = 1
+        current_text = ""
+        
+        lines = extracted_text.split('\n')
+        for line in lines:
+            if line.startswith("--- Page"):
+                if current_text.strip():
+                    pages_result.append({
+                        "page_number": current_page,
+                        "raw_text": current_text.strip(),
+                        "structured_data": []  # No structured data from text extraction
+                    })
+                    current_page += 1
+                    current_text = ""
+            else:
+                current_text += line + "\n"
+        
+        # Don't forget last page
+        if current_text.strip():
+            pages_result.append({
+                "page_number": current_page,
+                "raw_text": current_text.strip(),
+                "structured_data": []
+            })
+        
+        return pages_result
+
+    def _process_pdf_with_ocr(self, pdf_path: str) -> Dict[str, Any]:
+        """
+        Process PDF pages via OCR (called as fallback).
+        Page-by-page processing to minimize memory usage.
+        """
         pages_result = []
         full_raw_text = ""
         
@@ -76,6 +162,7 @@ class OCRService:
             try:
                 # Convert PDF to images
                 image_paths = convert_pdf_to_images(pdf_path, temp_dir)
+                log_memory_checkpoint(f"AFTER pdf_to_images ({len(image_paths)} pages)")
                 
                 # Process each page image
                 for i, img_path in enumerate(image_paths):
@@ -90,13 +177,20 @@ class OCRService:
                     full_raw_text += f"--- Page {i + 1} ---\n"
                     full_raw_text += page_res["raw_text"] + "\n\n"
                     
+                    # Explicit cleanup to reduce memory usage
+                    del page_res
+                    gc.collect()
+                    log_memory_checkpoint(f"AFTER page {i + 1} cleanup")
+                    
             except Exception as e:
-                logger.error(f"Error processing PDF {pdf_path}: {str(e)}")
+                logger.error(f"Error processing PDF {pdf_path} with OCR: {str(e)}")
                 raise
-                
+        
         return {
             "raw_text": full_raw_text.strip(),
-            "pages": pages_result
+            "pages": pages_result,
+            "extraction_method": "ocr",
+            "processed_via_ocr": True
         }
 
 # Singleton instance

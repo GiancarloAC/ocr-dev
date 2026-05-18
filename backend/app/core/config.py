@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     USE_GPU: bool = False
     OCR_LANG: str = "en"
     
+    # Performance Settings
+    MAX_UPLOAD_SIZE_MB: int = 50  # Maximum file upload size
+    TORCH_NUM_THREADS: int = 2  # Limit PyTorch threads to reduce RAM
+    NUMPY_NUM_THREADS: int = 2  # Limit NumPy threads
+    
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()
